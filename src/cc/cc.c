@@ -8,6 +8,7 @@
 // トークンの種類
 typedef enum {
   TK_RESERVED, // 記号
+  TK_IDENT,    // 識別子
   TK_NUM,      // 整数トークン
   TK_EOF,      // 入力の終わりを表すトークン
 } TokenKind;
@@ -119,6 +120,12 @@ Token *tokenize() {
 			continue;
 		}
 
+		if ('a' <= *p && *p <= 'z') {
+			cur = new_token(TK_IDENT, cur, p++, 1);
+			cur->len = 1;
+			continue;
+}
+
     // Single-letter punctuator
     if (strchr("+-*/()<>", *p)) {
       cur = new_token(TK_RESERVED, cur, p++, 1);
@@ -155,6 +162,8 @@ typedef enum {
   ND_LT,  // <
   ND_LE,  // <=
   ND_NUM, // Integer
+  ND_ASSIGN, // =
+  ND_LVAR,   // ローカル変数
 } NodeKind;
 
 // AST node type
@@ -164,6 +173,7 @@ struct Node {
   Node *lhs;     // Left-hand side
   Node *rhs;     // Right-hand side
   int val;       // Used if kind == ND_NUM
+  int offset;    // Used if kind == ND_LVAR 
 };
 
 Node *new_node(NodeKind kind) {
@@ -183,6 +193,32 @@ Node *new_num(int val) {
   Node *node = new_node(ND_NUM);
   node->val = val;
   return node;
+}
+
+Node *code[100];
+
+Node *assign() {
+  Node *node = equality();
+  if (consume("="))
+    node = new_node(ND_ASSIGN, node, assign());
+  return node;
+}
+
+Node *expr() {
+  return assign();
+}
+
+Node *stmt() {
+  Node *node = expr();
+  expect(";");
+  return node;
+}
+
+void program() {
+  int i = 0;
+  while (!at_eof())
+    code[i++] = stmt();
+  code[i] = NULL;
 }
 
 Node *expr();
@@ -267,6 +303,14 @@ Node *primary() {
     return node;
   }
 
+	Token *tok = consume_ident();
+  if (tok) {
+    Node *node = calloc(1, sizeof(Node));
+    node->kind = ND_LVAR;
+    node->offset = (tok->str[0] - 'a' + 1) * 8;
+    return node;
+  }
+
   return new_num(expect_number());
 }
 
@@ -335,26 +379,51 @@ void gen(Node *node) {
   printf("  push rax\n");
 }
 
+void gen_lval(Node *node) {
+  if (node->kind != ND_LVAR)
+    error("代入の左辺値が変数ではありません");
+
+  printf("  mov rax, rbp\n");
+  printf("  sub rax, %d\n", node->offset);
+  printf("  push rax\n");
+}
+
 int main(int argc, char **argv) {
-  if (argc != 2)
-    error("%s: invalid number of arguments", argv[0]);
+  if (argc != 2) {
+    error("引数の個数が正しくありません");
+    return 1;
+  }
 
-  // Tokenize and parse.
+  // トークナイズしてパースする
+  // 結果はcodeに保存される
   user_input = argv[1];
-  token = tokenize();
-  Node *node = expr();
+  tokenize();
+  program();
 
-  // Print out the first half of assembly.
+  // アセンブリの前半部分を出力
   printf(".intel_syntax noprefix\n");
   printf(".global main\n");
   printf("main:\n");
 
-  // Traverse the AST to emit assembly.
-  gen(node);
+  // プロローグ
+  // 変数26個分の領域を確保する
+  printf("  push rbp\n");
+  printf("  mov rbp, rsp\n");
+  printf("  sub rsp, 208\n");
 
-  // A result must be at the top of the stack, so pop it
-  // to RAX to make it a program exit code.
-  printf("  pop rax\n");
+  // 先頭の式から順にコード生成
+  for (int i = 0; code[i]; i++) {
+    gen(code[i]);
+
+    // 式の評価結果としてスタックに一つの値が残っている
+    // はずなので、スタックが溢れないようにポップしておく
+    printf("  pop rax\n");
+  }
+
+  // エピローグ
+  // 最後の式の結果がRAXに残っているのでそれが返り値になる
+  printf("  mov rsp, rbp\n");
+  printf("  pop rbp\n");
   printf("  ret\n");
   return 0;
 }
